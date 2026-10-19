@@ -605,19 +605,8 @@ describe("claude-cli buffered completion (offline)", () => {
 describe("claude-cli captured tool-call events preserved after protocol error (offline)", () => {
   test("tool-call events emitted before a malformed final line remain intact", async () => {
     const stdout = [
-      enc.encode('{"type":"system","subtype":"init"}\n'),
-      enc.encode(JSON.stringify({
-        type: "stream_event",
-        event: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_1", name: "read_file" } },
-      }) + "\n"),
-      enc.encode(JSON.stringify({
-        type: "stream_event",
-        event: { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"path":"fixture.txt"}' } },
-      }) + "\n"),
-      enc.encode(JSON.stringify({
-        type: "stream_event",
-        event: { type: "content_block_stop", index: 0 },
-      }) + "\n"),
+      enc.encode('{"type":"system","subtype":"init","mcp_servers":[{"name":"opencodex","status":"connected"}]}\n'),
+      enc.encode(claudeCliToolFrame(0, "tu_1", CLAUDE_CLI_MCP_TOOL, '{"path":"fixture.txt"}')),
       enc.encode("not-json\n"), // malformed line after valid tool calls
     ];
     const adapter = createClaudeCliAdapter(provider(), {
@@ -625,7 +614,7 @@ describe("claude-cli captured tool-call events preserved after protocol error (o
       which: () => "/opt/homebrew/bin/claude",
       killGraceMs: 20,
     });
-    const events = await run(adapter, parsed());
+    const events = await run(adapter, claudeCliToolRequest());
     // The call captured before the malformed line stays complete: the client still learns which
     // tool was asked for and with which arguments, so it can execute it and return a result.
     const starts = events.filter(e => e.type === "tool_call_start");
@@ -796,6 +785,9 @@ describe("claude-cli missing/duplicate/unknown result IDs in tool calls (offline
     // The unmatched id is passed through verbatim, next to the call that DOES match.
     expect(written).toContain("TOOL RESULT (call_id: call_unknown)");
     expect(written).toContain("[Tool call: mcp__opencodex__read_file (call_id: call_known)");
+    // Both result bodies reach the CLI, so the model sees the content and not only the labels.
+    expect(written).toContain("result of a call that never happened");
+    expect(written).toContain("result whose tool name does not match the call");
     // A result whose tool NAME disagrees with the call it claims is not rejected either, and
     // the name is not even rendered: the replay carries the id and the content, nothing else.
     expect(written).toContain("TOOL RESULT (call_id: call_known)");
@@ -930,6 +922,17 @@ describe("claude-cli schema propagation and completion contract (offline)", () =
       enc.encode('{"type":"system","subtype":"init"}\n'),
       enc.encode(textDelta('{"answer":')),
       enc.encode(textDelta('"42"}')),
+      // The CLI also sends the complete assistant message it already streamed. It must not
+      // produce a second copy of the text.
+      enc.encode(JSON.stringify({
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: '{"answer":"42"}' }],
+          stop_reason: "stop",
+          usage: { input_tokens: 4, output_tokens: 2 },
+        },
+      }) + "\n"),
       enc.encode('{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":4,"output_tokens":2}}\n'),
     ];
     const adapter = createClaudeCliAdapter(provider(), {
